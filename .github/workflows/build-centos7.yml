@@ -1,0 +1,114 @@
+name: Build for CentOS 7
+
+# 在 centos:7 容器 (glibc 2.17) 中构建 omp 原生模块,
+# 产物 pi_natives.linux-x64-modern.node 上传到名为 "centos7-latest" 的滚动 Release。
+#
+# 为什么全程纯 shell 而不用 actions/checkout 或 actions/upload-artifact:
+# centos:7 的 glibc 2.17 跑不了这些 action 依赖的 node20 (需要 glibc 2.28+),
+# 会报 "GLIBC_2.28 not found"。因此 clone 用 conda 的 git, 上传用静态编译的 gh CLI。
+
+on:
+  workflow_dispatch: # 手动触发
+  push:
+    branches: [main]
+    paths: # 只在可能影响原生模块的变更后重建
+      - "crates/**"
+      - "packages/natives/**"
+      - "rust-toolchain.toml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "bun.lock"
+      - ".github/workflows/build-centos7.yml"
+
+permissions:
+  contents: write # 需要写 Release
+
+env:
+  # glibc 2.17 头文件不认识 _DEFAULT_SOURCE (2.19+ 才有),
+  # tree-sitter 编译需要 _BSD_SOURCE 来暴露 be16toh 等函数。
+  CFLAGS: "-D_BSD_SOURCE"
+  CXXFLAGS: "-D_BSD_SOURCE"
+  CARGO_INCREMENTAL: "0" # runner 磁盘仅 ~14G, 关掉增量缓存省 ~3G
+  BUN_VERSION: "1.4.3"   # 与本机验证过的版本保持一致
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: centos:7
+    steps:
+      - name: 修复 EOL yum 源并装基础工具
+        run: |
+          sed -i 's|^mirrorlist=|#mirrorlist=|; s|^#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|' /etc/yum.repos.d/CentOS-Base.repo
+          yum install -y curl bzip2 tar unzip which ca-certificates
+          update-ca-trust
+
+      - name: 释放 runner 磁盘
+        run: |
+          rm -rf /opt/hostedtoolcache /usr/local/lib/android /usr/share/dotnet 2>/dev/null || true
+          df -h /
+
+      - name: 安装 Miniforge (提供 git/cmake/ninja/make/gcc14)
+        run: |
+          curl -fsSL -o /tmp/mf.sh https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh
+          bash /tmp/mf.sh -b -p /opt/mf
+          /opt/mf/bin/conda install -y -q git cmake ninja make gcc gxx
+          /opt/mf/bin/conda clean -ayq
+          echo "/opt/mf/bin" >> "$GITHUB_PATH"
+          git --version && cmake --version | head -1 && ninja --version && gcc --version | head -1
+
+      - name: 安装 Rust nightly (rust-toolchain.toml 指定版本)
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.cargo/bin:$PATH"
+          rustup toolchain install nightly-2026-10-06 --profile minimal
+          cargo +nightly-2026-10-06 --version
+
+      - name: 安装 Bun
+        run: |
+          curl -fsSL -o /tmp/bun.zip "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-x64.zip"
+          unzip -q /tmp/bun.zip -d /opt && mv /opt/bun-linux-x64 /opt/bun
+          echo "/opt/bun" >> "$GITHUB_PATH"
+          /opt/bun/bun --version
+
+      - name: 克隆本仓库 (public, 无需认证; 容器内 node 不可用故不用 actions/checkout)
+        run: |
+          git clone --depth 1 https://github.com/xxay-16/omp.git "$GITHUB_WORKSPACE/omp"
+          cd "$GITHUB_WORKSPACE/omp" && git log --oneline -1
+
+      - name: bun install
+        run: |
+          cd "$GITHUB_WORKSPACE/omp"
+          bun install
+
+      - name: 构建原生模块
+        run: |
+          cd "$GITHUB_WORKSPACE/omp"
+          bun run build:native
+          ls -lh packages/natives/native/pi_natives.linux-x64-modern.node
+
+      - name: 冒烟验证
+        run: |
+          cd "$GITHUB_WORKSPACE/omp"
+          bun packages/coding-agent/src/cli.ts --version
+
+      - name: 安装 gh CLI (静态编译, 不受 glibc 2.17 限制)
+        run: |
+          curl -fsSL -o /tmp/gh.tgz https://github.com/cli/cli/releases/download/v2.102.0/gh_2.102.0_linux_amd64.tar.gz
+          tar xzf /tmp/gh.tgz -C /opt
+          ln -sf /opt/gh_2.102.0_linux_amd64/bin/gh /usr/local/bin/gh
+          gh --version
+
+      - name: 上传产物到滚动 Release
+        run: |
+          cd "$GITHUB_WORKSPACE/omp"
+          cp packages/natives/native/pi_natives.linux-x64-modern.node /tmp/
+          if ! gh release view centos7-latest >/dev/null 2>&1; then
+            gh release create centos7-latest \
+              --title "CentOS 7 build (glibc 2.17)" \
+              --notes "自动构建的原生模块, 跟随 main 分支滚动更新。sha: $(git rev-parse --short HEAD)" \
+              --prerelease
+          fi
+          gh release upload centos7-latest /tmp/pi_natives.linux-x64-modern.node --clobber
+          gh release view centos7-latest

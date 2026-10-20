@@ -1,0 +1,36 @@
+name: Sync upstream
+
+# 定时把上游 can1357/oh-my-pi 的 main 合并进本仓库的 main。
+# 合并产生 push 后会自动触发 build-centos7.yml 构建。
+
+on:
+  schedule:
+    - cron: "17 18 * * *" # 每天北京时间 02:17 (UTC 18:17)
+  workflow_dispatch: # 允许手动触发
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 合并需要完整历史
+
+      - name: Merge upstream and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/can1357/oh-my-pi.git
+          git fetch upstream main
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "已是最新, 无需合并"
+            exit 0
+          fi
+          if ! git merge --no-edit upstream/main; then
+            echo "::error::上游合并冲突, 请到本地手动处理: git pull upstream main"
+            exit 1
+          fi
+          git push origin main
