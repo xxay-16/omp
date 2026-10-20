@@ -55,7 +55,8 @@ jobs:
           /opt/mf/bin/conda install -y -q git cmake ninja make gcc gxx
           /opt/mf/bin/conda clean -ayq
           echo "/opt/mf/bin" >> "$GITHUB_PATH"
-          git --version && cmake --version | head -1 && ninja --version && gcc --version | head -1
+          # 注意: $GITHUB_PATH 对后续步骤生效, 本步骤内验证必须用全路径
+          /opt/mf/bin/git --version && /opt/mf/bin/cmake --version | head -1 && /opt/mf/bin/ninja --version && /opt/mf/bin/gcc --version | head -1
 
       - name: 安装 Rust nightly (rust-toolchain.toml 指定版本)
         run: |
