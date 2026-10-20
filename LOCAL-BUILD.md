@@ -2,12 +2,18 @@
 
 本仓库 = 上游 [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi) + 适配本机的构建流程。
 
-## 同步上游 + 重建（日常流程）
+## 全自动更新（已配置）
+
+1. GitHub Actions `sync-upstream.yml`：每天 02:17（北京时间）合并上游 → 推送到本仓库
+2. 本机 crontab：每天 04:30 跑 `update-local.sh`（pull + 按需重建，日志 `/tmp/opencode/omp-update.log`）
+3. GitHub Actions `build-centos7.yml`：同步后自动在 centos:7 容器构建，产物传 Release `centos7-latest`
+
+## 手动同步上游 + 重建
 
 ```bash
 # GitHub 直连慢，git 操作走 mihomo 代理（如未启动先启动:
 # nohup /work4/User/wangzhiyuan/software/bio_tools/mihomo -d ~/.config/clash > /tmp/opencode/mihomo.log 2>&1 &）
-https_proxy=http://127.0.0.1:7890 git pull upstream main
+https_proxy=http://127.0.0.1:7890 git pull origin main
 ./build-local.sh
 git push origin main   # 保存自己的修改
 ```
