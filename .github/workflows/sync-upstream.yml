@@ -29,8 +29,13 @@ jobs:
             echo "已是最新, 无需合并"
             exit 0
           fi
-          if ! git merge --no-edit upstream/main; then
+          if ! git merge --no-commit --no-ff upstream/main; then
             echo "::error::上游合并冲突, 请到本地手动处理: git pull upstream main"
             exit 1
           fi
+          # GITHUB_TOKEN 是 GitHub App, 没有 workflows 权限, 无法推送对
+          # .github/workflows/ 的修改 (remote rejected)。上游 CI 文件对本仓库
+          # 无用 (上游的 CI 已在本仓库禁用), 合并时永远保留本仓库的版本。
+          git checkout origin/main -- .github/workflows
+          git commit -m "chore: merge upstream main (workflows pinned to ours)"
           git push origin main
