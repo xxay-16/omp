@@ -6,12 +6,12 @@
 
 1. GitHub Actions `sync-upstream.yml`：每天 02:17（北京时间）合并上游 → 推送到本仓库
 2. 本机 crontab：每天 07:30/12:30/17:30 跑 `update-local.sh`（pull + 按需重建，日志 `/tmp/opencode/omp-update.log`）
-3. GitHub Actions `build-centos7.yml`：同步后自动在 centos:7 容器构建，**按版本号发 Release**（如 `v18.12.4`，产物 `pi_natives.linux-x64-modern.node`）
+3. GitHub Actions `build-centos7.yml`：同步后自动在 centos:7 容器构建，**每次构建独立发版**（tag 格式 `v<版本号>+<短sha>`，如 `v18.12.4+705f8c0`，历史产物永不覆盖）
 
 ```bash
-# 下载指定版本的产物
-gh release download v18.12.4 -R xxay-16/omp
-gh release list -R xxay-16/omp          # 查看所有版本
+# 下载指定构建的产物
+gh release list -R xxay-16/omp              # 查看所有构建版本
+gh release download "v18.12.4+705f8c0" -R xxay-16/omp
 ```
 
 ## 手动同步上游 + 重建

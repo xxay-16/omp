@@ -114,17 +114,17 @@ jobs:
           SHA=$(git rev-parse HEAD)
           SHA_SHORT=$(git rev-parse --short HEAD)
           VERSION=$(bun -e 'console.log(require("./packages/coding-agent/package.json").version)')
-          TAG="v$VERSION"
-          echo "版本: $VERSION (tag: $TAG), commit: $SHA_SHORT"
+          TAG="v$VERSION+$SHA_SHORT"
+          echo "版本: $VERSION, tag: $TAG, commit: $SHA_SHORT"
           cp packages/natives/native/pi_natives.linux-x64-modern.node /tmp/
-          NOTES=$(printf 'omp v%s 的 CentOS 7 (glibc 2.17) 原生模块。\n跟随本仓库 main 构建, commit: %s, 构建于 %s。\n用法: 替换仓库内 packages/natives/native/pi_natives.linux-x64-modern.node' "$VERSION" "$SHA_SHORT" "$(date -u '+%F %T UTC')")
-          # 同一版本多次构建时复用同一个 Release (tag 唯一), 只刷新产物与说明;
-          # 上游版本号变化时自动产生新的 v<version> Release。
+          NOTES=$(printf 'omp v%s 的 CentOS 7 (glibc 2.17) 原生模块。\n构建 commit: %s, 构建于 %s。\n用法: 替换仓库内 packages/natives/native/pi_natives.linux-x64-modern.node' "$VERSION" "$SHA_SHORT" "$(date -u '+%F %T UTC')")
+          # tag 带 commit 后缀 => 每次构建独立发版, 历史产物永不被覆盖。
+          # 同一 commit 重复构建时复用该 Release, 仅刷新产物与说明。
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG 已存在, 更新产物"
+            echo "Release $TAG 已存在(同一 commit), 更新产物"
           else
             gh release create "$TAG" \
-              --title "omp $VERSION (CentOS 7 / glibc 2.17)" \
+              --title "omp $VERSION ($SHA_SHORT)" \
               --notes "$NOTES" \
               --target "$SHA"
           fi
