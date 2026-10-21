@@ -108,19 +108,26 @@ jobs:
           ln -sf /opt/gh_2.102.0_linux_amd64/bin/gh /usr/local/bin/gh
           gh --version
 
-      - name: 上传产物到滚动 Release
+      - name: 按版本号发布 Release
         run: |
           cd "$GITHUB_WORKSPACE/omp"
-          SHA=$(git rev-parse --short HEAD)
+          SHA=$(git rev-parse HEAD)
+          SHA_SHORT=$(git rev-parse --short HEAD)
+          VERSION=$(bun -e 'console.log(require("./packages/coding-agent/package.json").version)')
+          TAG="v$VERSION"
+          echo "版本: $VERSION (tag: $TAG), commit: $SHA_SHORT"
           cp packages/natives/native/pi_natives.linux-x64-modern.node /tmp/
-          if ! gh release view centos7-latest >/dev/null 2>&1; then
-            gh release create centos7-latest \
-              --title "CentOS 7 build (glibc 2.17)" \
-              --notes "自动构建的原生模块, 跟随 main 分支滚动更新。sha: $SHA" \
-              --prerelease
+          NOTES=$(printf 'omp v%s 的 CentOS 7 (glibc 2.17) 原生模块。\n跟随本仓库 main 构建, commit: %s, 构建于 %s。\n用法: 替换仓库内 packages/natives/native/pi_natives.linux-x64-modern.node' "$VERSION" "$SHA_SHORT" "$(date -u '+%F %T UTC')")
+          # 同一版本多次构建时复用同一个 Release (tag 唯一), 只刷新产物与说明;
+          # 上游版本号变化时自动产生新的 v<version> Release。
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在, 更新产物"
+          else
+            gh release create "$TAG" \
+              --title "omp $VERSION (CentOS 7 / glibc 2.17)" \
+              --notes "$NOTES" \
+              --target "$SHA"
           fi
-          gh release upload centos7-latest /tmp/pi_natives.linux-x64-modern.node --clobber
-          # upload --clobber 只换文件不换说明, 显式刷新 sha 与构建时间
-          gh release edit centos7-latest \
-            --notes "自动构建的原生模块, 跟随 main 分支滚动更新。sha: $SHA, 构建于 $(date -u '+%F %T UTC')"
-          gh release view centos7-latest
+          gh release upload "$TAG" /tmp/pi_natives.linux-x64-modern.node --clobber
+          gh release edit "$TAG" --notes "$NOTES"
+          gh release view "$TAG"
