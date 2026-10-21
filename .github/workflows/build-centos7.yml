@@ -9,6 +9,11 @@ name: Build for CentOS 7
 
 on:
   workflow_dispatch: # 手动触发
+  # 关键: GitHub 防递归机制规定 GITHUB_TOKEN 推送不触发 on:push 的 workflow,
+  # 因此 sync-upstream 推送的合并提交必须靠 workflow_run 事件来衔接构建。
+  workflow_run:
+    workflows: ["Sync upstream"]
+    types: [completed]
   push:
     branches: [main]
     paths: # 只在可能影响原生模块的变更后重建
@@ -35,6 +40,8 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # workflow_run 触发时只在同步成功时构建
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     container: centos:7
     steps:
       - name: 修复 EOL yum 源并装基础工具
