@@ -111,12 +111,16 @@ jobs:
       - name: 上传产物到滚动 Release
         run: |
           cd "$GITHUB_WORKSPACE/omp"
+          SHA=$(git rev-parse --short HEAD)
           cp packages/natives/native/pi_natives.linux-x64-modern.node /tmp/
           if ! gh release view centos7-latest >/dev/null 2>&1; then
             gh release create centos7-latest \
               --title "CentOS 7 build (glibc 2.17)" \
-              --notes "自动构建的原生模块, 跟随 main 分支滚动更新。sha: $(git rev-parse --short HEAD)" \
+              --notes "自动构建的原生模块, 跟随 main 分支滚动更新。sha: $SHA" \
               --prerelease
           fi
           gh release upload centos7-latest /tmp/pi_natives.linux-x64-modern.node --clobber
+          # upload --clobber 只换文件不换说明, 显式刷新 sha 与构建时间
+          gh release edit centos7-latest \
+            --notes "自动构建的原生模块, 跟随 main 分支滚动更新。sha: $SHA, 构建于 $(date -u '+%F %T UTC')"
           gh release view centos7-latest
