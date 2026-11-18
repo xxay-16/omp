@@ -467,7 +467,6 @@ mod check {
 use std::{cmp::Ordering, ffi::OsStr, io::Read, iter, thread};
 
 use flume::{Receiver, Sender};
-use itertools::Itertools;
 use pi_vfs::BlockingFs;
 
 use super::{
@@ -534,7 +533,7 @@ pub fn check(fs: &BlockingFs, path: &OsStr, settings: &GlobalSettings) -> SortRe
 			let _ = recycled_sender.send(prev_chunk.recycle());
 		}
 
-		for (a, b) in chunk.lines().iter().tuple_windows() {
+		for [a, b] in chunk.lines().array_windows() {
 			line_idx += 1;
 			if compare_by(a, b, settings, chunk.line_data(), chunk.line_data()) > max_allowed_cmp {
 				return Err(
@@ -994,7 +993,7 @@ fn parse_lines<'a>(
 	let mut start = 0usize;
 	let mut index = 0usize;
 	for sep_idx in memchr_iter(separator, read) {
-		if index % (64 * 1024) == 0 && settings.cancel.load(AtomicOrdering::Relaxed) {
+		if index.is_multiple_of(64 * 1024) && settings.cancel.load(AtomicOrdering::Relaxed) {
 			return;
 		}
 		let line = &read[start..sep_idx];
@@ -1475,7 +1474,7 @@ mod tests {
 	/// The settings of a sort that compares collation keys, or None where ICU
 	/// has no collator for the locale.
 	fn collating_settings() -> Option<GlobalSettings> {
-		let locale = super::super::Locale::try_from_str("en").expect("locale");
+		let locale = icu_locale_core::Locale::try_from_str("en").expect("locale");
 		let collator =
 			super::super::CollatorBorrowed::try_new((&locale).into(), Default::default()).ok()?;
 		let mut settings = GlobalSettings::default();
@@ -2154,7 +2153,6 @@ use std::{
 	thread::{self, JoinHandle},
 };
 
-use compare::Compare;
 use flume::{Receiver, Sender};
 use pi_vfs::{BlockingFs, File};
 
@@ -2346,19 +2344,20 @@ fn merge_without_limit<M: MergeInput + 'static, F: Iterator<Item = SortResult<M>
 
 	for (file_number, receiver) in loaded_receivers.into_iter().enumerate() {
 		if let Ok(chunk) = receiver.recv() {
-			mergeable_files.push(MergeableFile {
-				current_chunk: Rc::new(chunk),
-				file_number,
-				line_idx: 0,
-				receiver,
+			mergeable_files.push(MergeHeapEntry {
+				file: MergeableFile {
+					current_chunk: Rc::new(chunk),
+					file_number,
+					line_idx: 0,
+					receiver,
+				},
+				settings,
 			});
 		}
 	}
 
 	Ok(FileMerger {
-		heap: binary_heap_plus::BinaryHeap::from_vec_cmp(mergeable_files, FileComparator {
-			settings,
-		}),
+		heap: std::collections::BinaryHeap::from(mergeable_files),
 		request_sender,
 		prev: None,
 		reader_join_handle,
@@ -2433,7 +2432,7 @@ struct PreviousLine {
 /// Merges files together. This is **not** an iterator because of lifetime
 /// problems.
 struct FileMerger<'a> {
-	heap:               binary_heap_plus::BinaryHeap<MergeableFile, FileComparator<'a>>,
+	heap:               std::collections::BinaryHeap<MergeHeapEntry<'a>>,
 	request_sender:     Sender<(usize, RecycledChunk)>,
 	prev:               Option<PreviousLine>,
 	reader_join_handle: JoinHandle<SortResult<()>>,
@@ -2549,13 +2548,44 @@ impl FileMerger<'_> {
 	}
 }
 
-/// Compares files by their current line.
-struct FileComparator<'a> {
+/// Orders each file by its current line and original input position.
+struct MergeHeapEntry<'a> {
+	file: MergeableFile,
 	settings: &'a GlobalSettings,
 }
 
-impl Compare<MergeableFile> for FileComparator<'_> {
-	fn compare(&self, a: &MergeableFile, b: &MergeableFile) -> Ordering {
+impl std::ops::Deref for MergeHeapEntry<'_> {
+	type Target = MergeableFile;
+
+	fn deref(&self) -> &Self::Target {
+		&self.file
+	}
+}
+
+impl std::ops::DerefMut for MergeHeapEntry<'_> {
+	fn deref_mut(&mut self) -> &mut Self::Target {
+		&mut self.file
+	}
+}
+
+impl PartialEq for MergeHeapEntry<'_> {
+	fn eq(&self, other: &Self) -> bool {
+		self.cmp(other) == Ordering::Equal
+	}
+}
+
+impl Eq for MergeHeapEntry<'_> {}
+
+impl PartialOrd for MergeHeapEntry<'_> {
+	fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+		Some(self.cmp(other))
+	}
+}
+
+impl Ord for MergeHeapEntry<'_> {
+	fn cmp(&self, other: &Self) -> Ordering {
+		let a = &self.file;
+		let b = &other.file;
 		let mut cmp = compare_by(
 			&a.current_chunk.lines()[a.line_idx],
 			&b.current_chunk.lines()[b.line_idx],
@@ -2576,11 +2606,8 @@ impl Compare<MergeableFile> for FileComparator<'_> {
 
 /// Wait for the child to exit and check its exit code.
 fn check_child_success(mut child: Child, program: &str) -> SortResult<()> {
-	if matches!(child.wait().map(|e| e.code()), Ok(Some(0) | None) | Err(_)) {
-		Ok(())
-	} else {
-		Err(SortError::CompressProgTerminatedAbnormally { prog: program.to_owned() }.into())
-	}
+	matches!(child.wait().map(|e| e.code()), Ok(Some(0) | None) | Err(_))
+		.ok_or_else(|| SortError::CompressProgTerminatedAbnormally { prog: program.to_owned() }.into())
 }
 
 /// A temporary file that can be written to.
@@ -3356,7 +3383,10 @@ mod tmp_dir {
 // For the full copyright and license information, please view the LICENSE
 // file that was distributed with this source code.
 
-use std::path::{Path, PathBuf};
+use std::{
+	fmt::NumBuffer,
+	path::{Path, PathBuf},
+};
 
 use pi_vfs::{BlockingFs, File, OpenOptions, TempOptions};
 
@@ -3405,7 +3435,7 @@ impl TmpDirWrapper {
 			self.init_tmp_dir()?;
 		}
 		let dir = self.temp_dir.as_deref().expect("temporary directory was created");
-		let path = pi_vfs::join_path(dir, Path::new(&self.size.to_string()));
+		let path = pi_vfs::join_path(dir, Path::new(self.size.format_into(&mut NumBuffer::new())));
 		let file = self
 			.fs
 			.open_with(&path, OpenOptions::new().write(true).create_new(true))
@@ -3436,28 +3466,24 @@ use std::num::NonZero;
 use std::{
 	cmp::Ordering,
 	ffi::{OsStr, OsString},
+	fmt::NumBuffer,
 	hash::{Hash, Hasher},
 	io::{BufRead, BufReader, BufWriter, Read, Write},
 	num::IntErrorKind,
 	ops::Range,
 	path::{Path, PathBuf},
-	sync::{Arc, LazyLock, OnceLock, atomic::{AtomicBool, Ordering as AtomicOrdering}},
+	sync::{Arc, LazyLock, atomic::{AtomicBool, Ordering as AtomicOrdering}},
 };
 
 use bigdecimal::BigDecimal;
-use brush_core::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
+use crate::openfile::OpenFile;
 use chunks::LineData;
 use clap::{Arg, ArgAction, ArgMatches, Command, CommandFactory, FromArgMatches, builder::ValueParser};
 use custom_str_cmp::custom_str_cmp;
 use ext_sort::ext_sort;
 use foldhash::{HashMap, SharedSeed, fast::FoldHasher};
-use icu_collator::{
-	CollatorBorrowed,
-	options::{AlternateHandling, CollatorOptions, Strength},
-};
-use icu_locale_core::Locale;
+use icu_collator::CollatorBorrowed;
 use numeric_str_cmp::{NumInfo, NumInfoParseSettings, human_numeric_str_cmp, numeric_str_cmp};
-use parking_lot::Mutex;
 use pi_vfs::{BlockingFs, File, OpenOptions};
 use rand::{RngExt as _, rng};
 #[cfg(not(target_os = "wasi"))]
@@ -3477,11 +3503,9 @@ use uucore::{
 	version_cmp::version_cmp,
 };
 
-#[cfg(unix)]
-use crate::locale::locale_loadable;
 use crate::{
-	host::{Host, Utility, format_usage, rayon_global_pool_available, util},
-	locale::{numeric_symbols, parse_locale_name, shell_locale},
+	host::{Host, Utility, format_usage, rayon_global_pool_available},
+	locale::{collation_locale_failed, numeric_symbols, shell_collator, shell_locale},
 	sort::{
 		buffer_hint::automatic_buffer_size,
 		tmp_dir::{TmpDirWrapper, TmpFile},
@@ -4904,36 +4928,6 @@ impl FieldSelector {
 	}
 }
 
-/// Collators built so far, by locale. Building one resolves the locale's
-/// tailoring through ICU's fallback chain, which repeated calls skip. `None`
-/// records a locale ICU could not build a collator for.
-static COLLATORS: LazyLock<Mutex<HashMap<Locale, Option<Arc<CollatorBorrowed<'static>>>>>> =
-	LazyLock::new(Default::default);
-
-/// The collator for the shell's LC_COLLATE, or `None` to compare text by
-/// bytes: the locale must be UTF-8 (uucore's rule) and loadable by the system
-/// (GNU falls back to byte order otherwise).
-fn shell_collator(host: &Host) -> Option<Arc<CollatorBorrowed<'static>>> {
-	let (locale, utf8) = parse_locale_name(shell_locale(host, "LC_COLLATE")?)?;
-	if !utf8 || locale_failed_to_set(host) {
-		return None;
-	}
-	COLLATORS
-		.lock()
-		.entry(locale)
-		.or_insert_with_key(|locale| {
-			// Shift punctuation behind letters, but retain its quaternary
-			// distinctions for `-u` and `-c` instead of treating paths as equal.
-			let mut options = CollatorOptions::default();
-			options.alternate_handling = Some(AlternateHandling::Shifted);
-			options.strength = Some(Strength::Quaternary);
-			CollatorBorrowed::try_new(locale.into(), options)
-				.ok()
-				.map(Arc::new)
-		})
-		.clone()
-}
-
 /// Decimal point and thousands separator for the shell's LC_NUMERIC.
 fn detect_numeric_locale(host: &Host) -> NumericLocaleSettings {
 	let symbols = numeric_symbols(host);
@@ -5188,10 +5182,11 @@ fn legacy_key_to_k(from: &LegacyKeyPart, to: Option<&LegacyKeyPart>) -> String {
 		};
 
 		keydef.push(',');
-		keydef.push_str(&end_field.to_string());
+		let mut buf = NumBuffer::new();
+		keydef.push_str(end_field.format_into(&mut buf));
 		if to.char_pos != 0 {
 			keydef.push('.');
-			keydef.push_str(&to.char_pos.to_string());
+			keydef.push_str(to.char_pos.format_into(&mut buf));
 		}
 		keydef.push_str(&to.opts);
 	}
@@ -5350,17 +5345,6 @@ fn default_merge_batch_size() -> usize {
 	}
 }
 
-#[cfg(not(unix))]
-fn locale_failed_to_set(host: &Host) -> bool {
-	host.var("LC_ALL") == Some("missing")
-}
-
-#[cfg(unix)]
-fn locale_failed_to_set(host: &Host) -> bool {
-	shell_locale(host, "LC_COLLATE")
-		.is_some_and(|locale| !locale_loadable(locale, nix::libc::LC_COLLATE_MASK))
-}
-
 fn key_zero_width(selector: &FieldSelector) -> bool {
 	let Some(to) = &selector.to else {
 		return false;
@@ -5381,10 +5365,7 @@ fn key_spans_multiple_fields(selector: &FieldSelector) -> bool {
 	) {
 		return false;
 	}
-	match &selector.to {
-		None => true,
-		Some(to) => to.field > selector.from.field,
-	}
+	selector.to.as_ref().is_none_or(|to| to.field > selector.from.field)
 }
 
 fn key_leading_blanks_significant(selector: &FieldSelector) -> bool {
@@ -5399,7 +5380,7 @@ fn emit_debug_warnings(
 	flags: &GlobalOptionFlags,
 	legacy_warnings: &[LegacyKeyWarning],
 ) {
-	if locale_failed_to_set(host) {
+	if collation_locale_failed(host) {
 		show_error!(&mut host.stderr, "{}", "failed to set locale");
 	}
 
@@ -6280,11 +6261,6 @@ fn uu_app() -> Command {
 		)
 }
 
-/// Creates the `sort` builtin registration.
-pub(crate) fn sort_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Sort, SE>()
-}
-
 fn exec(
 	fs: &BlockingFs,
 	stdin: &StdinOperand,
@@ -6794,33 +6770,31 @@ enum Month {
 type MonthTable = Vec<(Vec<u8>, Month)>;
 
 fn get_locale_month_table() -> Option<&'static MonthTable> {
-	static TABLE: OnceLock<Option<MonthTable>> = OnceLock::new();
+	static TABLE: LazyLock<Option<MonthTable>> = LazyLock::new(|| {
+		let months = get_locale_months()?;
+		let all_months = [
+			Month::January,
+			Month::February,
+			Month::March,
+			Month::April,
+			Month::May,
+			Month::June,
+			Month::July,
+			Month::August,
+			Month::September,
+			Month::October,
+			Month::November,
+			Month::December,
+		];
+		let table: Vec<(Vec<u8>, Month)> = months
+			.iter()
+			.zip(all_months.iter())
+			.map(|(name, &month)| (name.clone(), month))
+			.collect();
+		Some(table)
+	});
 
-	TABLE
-		.get_or_init(|| {
-			let months = get_locale_months()?;
-			let all_months = [
-				Month::January,
-				Month::February,
-				Month::March,
-				Month::April,
-				Month::May,
-				Month::June,
-				Month::July,
-				Month::August,
-				Month::September,
-				Month::October,
-				Month::November,
-				Month::December,
-			];
-			let table: Vec<(Vec<u8>, Month)> = months
-				.iter()
-				.zip(all_months.iter())
-				.map(|(name, &month)| (name.clone(), month))
-				.collect();
-			Some(table)
-		})
-		.as_ref()
+	TABLE.as_ref()
 }
 
 /// Parse the beginning string into a Month, returning [`Month::Unknown`] on
@@ -6888,7 +6862,7 @@ fn print_sorted<'a, T: Iterator<Item = &'a Line<'a>>>(
 		.map_err(|error| SortError::WriteFailed { path: output_name.clone(), error })?;
 	for (index, line) in iter.enumerate() {
 		// A result held in memory can be a gigabyte of lines.
-		if index % (64 * 1024) == 0 && settings.cancel.load(AtomicOrdering::Relaxed) {
+		if index.is_multiple_of(64 * 1024) && settings.cancel.load(AtomicOrdering::Relaxed) {
 			return Err(SortError::Cancelled);
 		}
 		line.print(&mut writer, settings)
@@ -6966,6 +6940,8 @@ fn format_error_message(error: &ParseSizeError, s: &str, option: &str) -> String
 mod tests {
 
 	use super::*;
+	#[cfg(unix)]
+	use crate::locale::locale_loadable;
 	use crate::host::run_util;
 
 	fn tokenize_helper(line: &[u8], separator: Option<u8>) -> Vec<Field> {
@@ -7169,6 +7145,28 @@ mod tests {
 		let (code, capture) = run_util::<Sort>(&["-C"], "beta\nalpha\n", "/");
 		assert_eq!(code, 1);
 		assert_eq!(capture.err(), "");
+	}
+
+	#[test]
+	fn merge_preserves_input_order_for_equal_keys_in_both_directions() {
+		let dir = tempfile::tempdir().expect("temp dir");
+		std::fs::write(dir.path().join("first"), "a first-1\na first-2\nb first\n")
+			.expect("fixture");
+		std::fs::write(dir.path().join("second"), "a second\nb second\n")
+			.expect("fixture");
+		let (code, capture) =
+			run_util::<Sort>(&["-m", "-s", "-k1,1", "first", "second"], "", dir.path());
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "a first-1\na first-2\na second\nb first\nb second\n");
+
+		std::fs::write(dir.path().join("first"), "b first\na first-1\na first-2\n")
+			.expect("fixture");
+		std::fs::write(dir.path().join("second"), "b second\na second\n")
+			.expect("fixture");
+		let (code, capture) =
+			run_util::<Sort>(&["-m", "-s", "-r", "-k1,1", "first", "second"], "", dir.path());
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "b first\nb second\na first-1\na first-2\na second\n");
 	}
 
 	#[test]

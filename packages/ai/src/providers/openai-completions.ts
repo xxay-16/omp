@@ -14,6 +14,7 @@ import {
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
+import { isReasoningSourceSignature, MISTRAL_CONTENT_PARTS_SIGNATURE } from "../utils/reasoning-source";
 import { getKimiCommonHeaders } from "../registry/oauth/kimi";
 import { getEnvApiKey } from "../env-api-key";
 import type {
@@ -252,6 +253,31 @@ function mergeStoredGeminiSignature(existing: string | undefined, update: Stored
 	return JSON.stringify(merged);
 }
 
+/** The stored signature envelope for a client-replayed `extra_content` (`google` or `vertex`), as this provider writes it. */
+export function storeGeminiToolCallSignature(extraContent: unknown): string | undefined {
+	const perCall = getGeminiThoughtSignatureExtraContent(extraContent);
+	return perCall ? JSON.stringify({ perCall } satisfies StoredGeminiSignature) : undefined;
+}
+
+/**
+ * The `extra_content` that replays a tool call's Gemini signature on an OpenAI-compatible wire: read from the
+ * envelope this provider stores, or wrapped from the raw signature a native Gemini transport recorded.
+ */
+export function geminiToolCallExtraContent(
+	thoughtSignature: string | undefined,
+): GeminiThoughtSignatureExtraContent | undefined {
+	if (!thoughtSignature) return undefined;
+	const stored = parseStoredThoughtSignature(thoughtSignature);
+	if (stored === undefined) return { google: { thought_signature: thoughtSignature } };
+	return getGeminiThoughtSignatureExtraContent(normalizeStoredGeminiSignature(stored)?.perCall);
+}
+
+/** The raw Gemini signature behind a tool call's `thoughtSignature`, as native Gemini parts carry it. */
+export function rawGeminiToolCallSignature(thoughtSignature: string | undefined): string | undefined {
+	const extraContent = geminiToolCallExtraContent(thoughtSignature);
+	return extraContent?.google?.thought_signature ?? extraContent?.vertex?.thought_signature;
+}
+
 /**
  * LiteLLM's wire shape for Anthropic thinking: streamed as
  * `delta.thinking_blocks` (mirrored under
@@ -273,11 +299,12 @@ function getLiteLLMThinkingBlocksDelta(delta: object): unknown[] | undefined {
 	return Array.isArray(mirrored) && mirrored.length > 0 ? mirrored : undefined;
 }
 
-/** Whether a thinking block's signature is a raw LiteLLM (Anthropic) one, not a reasoning field name. */
+/**
+ * Whether a thinking block's signature is a raw LiteLLM (Anthropic) one, not a
+ * reasoning field name or the Mistral content-parts marker.
+ */
 export function isLiteLLMThinkingSignature(signature: string | undefined): signature is string {
-	return (
-		!!signature && signature !== "reasoning_content" && signature !== "reasoning" && signature !== "reasoning_text"
-	);
+	return !!signature && !isReasoningSourceSignature(signature);
 }
 
 /**
@@ -662,6 +689,11 @@ export interface OpenAICompletionsOptions extends StreamOptions {
 	openrouterVariant?: string;
 	/** Opt-in GPT-5.6+ prompt-cache policy. Unsupported explicit mode fails locally. */
 	promptCache?: OpenAIPromptCacheOptions;
+	/**
+	 * Send no `X-Stainless-Timeout` for the first-event budget. For adapter
+	 * wrappers whose native client strips the SDK telemetry headers.
+	 */
+	omitStainlessTimeoutHeader?: boolean;
 }
 
 type AppliedToolStrictMode = "mixed" | "all_strict" | "none";
@@ -809,7 +841,6 @@ const streamOpenAICompletionsOnce = (
 	(async () => {
 		const startTime = performance.now();
 		let firstTokenTime: number | undefined;
-		const policy = resolveOpenAICompatForRequest(model, options, Boolean(context.tools?.length));
 
 		const output: AssistantMessage = createInitialResponsesAssistantMessage(model.api, model.provider, model.id);
 		let rawRequestDump: RawHttpRequestDump | undefined;
@@ -851,6 +882,7 @@ const streamOpenAICompletionsOnce = (
 		let finishOpenBlocksOnError: () => void = () => {};
 
 		try {
+			const policy = resolveOpenAICompatForRequest(model, options, Boolean(context.tools?.length));
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
 			const idleTimeoutFallbackMs = model.compat.streamIdleTimeoutMs;
 			const idleTimeoutMs = options?.streamIdleTimeoutMs ?? getOpenAIStreamIdleTimeoutMs(idleTimeoutFallbackMs);
@@ -938,7 +970,7 @@ const streamOpenAICompletionsOnce = (
 				}
 				try {
 					const headersWithTimeout = { ...headers };
-					if (requestTimeoutMs !== undefined) {
+					if (requestTimeoutMs !== undefined && !options?.omitStainlessTimeoutHeader) {
 						headersWithTimeout["X-Stainless-Timeout"] = Math.floor(requestTimeoutMs / 1000).toString();
 					}
 					const { events, response, requestId } = await postOpenAIStream<ChatCompletionChunk>({
@@ -1508,7 +1540,7 @@ const streamOpenAICompletionsOnce = (
 							if (part?.type === "thinking" && Array.isArray(part.thinking)) {
 								for (const inner of part.thinking as Array<{ type?: unknown; text?: unknown } | null>) {
 									if (inner?.type === "text" && typeof inner.text === "string" && inner.text.length > 0) {
-										appendThinkingDelta(inner.text, "mistral-content-parts");
+										appendThinkingDelta(inner.text, MISTRAL_CONTENT_PARTS_SIGNATURE);
 										suppressHealedThinking = true;
 									}
 								}

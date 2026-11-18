@@ -24,14 +24,14 @@ each render the provider receives the current `ViewportSize` and returns a
 
 ```ts
 interface HistoryBatch {
-  readonly id: number;
-  readonly rows: readonly string[];
-  readonly kind?: "append" | "replay";
+	readonly id: number;
+	readonly rows: readonly string[];
+	readonly kind?: "append" | "replay";
 }
 
 interface TerminalFramePlan {
-  readonly history?: HistoryBatch;
-  readonly viewport: readonly string[];
+	readonly history?: HistoryBatch;
+	readonly viewport: readonly string[];
 }
 ```
 
@@ -76,6 +76,16 @@ ledger suffix that fits into leading blank viewport rows, retains the prefix as
 history remainder, prepares `remainder || finalViewport`, and performs one
 synchronous `terminal.write`. No block-at-a-time replay frames are observable.
 Ordinary renders never audit or rewrite terminal history.
+
+Without synchronized output (Terminal.app ignores DEC 2026) the terminal may
+present any prefix of a frame's write, so those frames never repaint through
+rows that only moved. Rows about to leave the screen first show their history
+line, line feeds on the bottom row push them into scrollback, surviving rows
+shift into place with DL/IL (never deleting on the top row, which Terminal.app
+archives into scrollback), and only rows that still differ are rewritten. Every
+intermediate screen is the previous frame scrolled or shifted, never a row
+beside its stale copy or an erased band awaiting repaint. Frames with images or
+OSC 66 text keep the plain row-rewrite path.
 
 Visible overlays are screen-coordinate content. They composite over the
 viewport and never become history. Showing, updating, or closing an overlay
@@ -228,7 +238,7 @@ A terminal that sees `"send"` and a ready composer may submit a supplied prompt
 with an `e` message:
 
 ```json
-{"ev":"send","sf":"s:1","id":"k.line/input","text":"First line\nSecond line"}
+{ "ev": "send", "sf": "s:1", "id": "k.line/input", "text": "First line\nSecond line" }
 ```
 
 `sf` must name a live surface and `id` its editable composer node (the

@@ -33,8 +33,9 @@ const DIFF_METADATA_PREFIXES: [&str; 15] = [
 ];
 const PATCH_WRAPPER_PREFIXES: [&str; 2] = ["*** Begin Patch", "*** End Patch"];
 const DEFAULT_ADDED_RUN_CONTEXT_LINES: usize = 2;
+/// Marks rows a preview omits. Hunk gaps (blank diff rows) render as it too: a
+/// bare blank row would hide that the lines between hunks were skipped.
 const PREVIEW_ELISION_MARKER: &str = "…";
-const PREVIEW_GAP_ROW: &str = "";
 
 /// Rendered diff plus the 1-indexed first changed line in the new text.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -652,18 +653,16 @@ pub struct CompactDiffOptions {
 	pub max_unchanged_run:     Option<usize>,
 }
 
-fn is_preview_separator(line: &str) -> bool {
-	line == PREVIEW_ELISION_MARKER || line == PREVIEW_GAP_ROW
-}
-
 fn append_preview_line(output: &mut Vec<String>, line: &str) {
-	let normalized = if matches!(line, "..." | PREVIEW_ELISION_MARKER | "+…") {
+	let normalized = if matches!(line, "" | "..." | PREVIEW_ELISION_MARKER | "+…") {
 		PREVIEW_ELISION_MARKER
 	} else {
 		line
 	};
-	if is_preview_separator(normalized)
-		&& (output.is_empty() || output.last().is_some_and(|last| is_preview_separator(last)))
+	if normalized == PREVIEW_ELISION_MARKER
+		&& output
+			.last()
+			.is_none_or(|last| last == PREVIEW_ELISION_MARKER)
 	{
 		return;
 	}
@@ -777,7 +776,7 @@ pub fn build_compact_diff_preview(diff: &str, options: &CompactDiffOptions) -> C
 	append_added_run(&mut formatted, &added_run, added_run_context);
 	while formatted
 		.last()
-		.is_some_and(|line| is_preview_separator(line))
+		.is_some_and(|line| line == PREVIEW_ELISION_MARKER)
 	{
 		formatted.pop();
 	}
@@ -823,25 +822,17 @@ fn is_patch_wrapper_line(line: &str) -> bool {
 /// Strip wrapper/metadata lines and trailing blank rows from a diff body.
 pub fn normalize_diff(diff: &str) -> String {
 	let mut lines = diff.split('\n').collect::<Vec<_>>();
-	while let Some(last_line) = lines.last().copied() {
-		if last_line.is_empty() || (last_line.trim().is_empty() && !is_diff_content_line(last_line)) {
-			lines.pop();
-		} else {
-			break;
-		}
-	}
+	while lines
+		.pop_if(|line| line.is_empty() || (line.trim().is_empty() && !is_diff_content_line(line)))
+		.is_some()
+	{}
 	if lines
 		.first()
 		.is_some_and(|line| is_patch_wrapper_line(line.trim()))
 	{
 		lines.remove(0);
 	}
-	if lines
-		.last()
-		.is_some_and(|line| is_patch_wrapper_line(line.trim()))
-	{
-		lines.pop();
-	}
+	lines.pop_if(|line| is_patch_wrapper_line(line.trim()));
 	lines.retain(|line| {
 		is_diff_content_line(line) || !matches_trimmed_prefix(line.trim(), &DIFF_METADATA_PREFIXES)
 	});
@@ -933,8 +924,8 @@ fn strip_line_number_prefixes(hunk: &mut DiffHunk) {
 		.filter_map(|captures| captures.get(1)?.as_str().parse::<u32>().ok())
 		.collect::<Vec<_>>();
 	let sequential = numbers
-		.windows(2)
-		.filter(|pair| pair[1] == pair[0] + 1)
+		.array_windows()
+		.filter(|&&[previous, next]| next == previous + 1)
 		.count();
 	if numbers.len() >= 3 && sequential < 1_usize.max(numbers.len() - 2) {
 		return;
@@ -974,8 +965,7 @@ fn parse_one_hunk(
 		.then(|| parse_unified_hunk_header(header_trimmed))
 		.flatten();
 	let is_empty_context_marker = header_trimmed
-		.strip_prefix("@@")
-		.and_then(|rest| rest.strip_suffix("@@"))
+		.strip_circumfix("@@", "@@")
 		.is_some_and(|middle| middle.trim().is_empty());
 
 	if is_header_line && (header_trimmed == EMPTY_CHANGE_CONTEXT_MARKER || is_empty_context_marker) {
@@ -1484,7 +1474,7 @@ mod tests {
 			"\n 1|alpha\n\n-5|beta\n\n 9|gamma\n\n-12|omitted",
 			&CompactDiffOptions::default(),
 		);
-		assert_eq!(preview.preview, "1:alpha\n\n8:gamma");
+		assert_eq!(preview.preview, "1:alpha\n…\n8:gamma");
 		assert_eq!(preview.removed_lines, 2);
 	}
 

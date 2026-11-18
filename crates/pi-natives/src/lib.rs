@@ -27,23 +27,27 @@ pub mod applefm;
 pub mod ast;
 pub mod audio;
 pub mod block;
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+mod bundled_libc;
 pub mod clipboard;
+pub mod console_threads;
 pub mod crash_handler;
 pub mod desktop;
 pub mod devicecheck;
 pub mod diff;
+/// Directory change watching via `ReadDirectoryChangesW` (Windows).
+pub mod dir_watch;
 pub mod edit;
 pub mod fd;
 pub mod file_lock;
 pub mod glob;
-pub mod glob_util;
 pub mod grammars;
 pub mod grep;
+pub mod held_files;
 pub mod highlight;
 /// HDiffPatch single-stream binary patch application.
 pub mod hpatch;
 pub mod html;
-pub mod iofs;
 /// Local IPC over Unix domain sockets / Windows named pipes.
 pub mod ipc;
 pub mod js;
@@ -77,6 +81,7 @@ pub mod task;
 pub(crate) mod testing;
 pub mod text;
 pub mod tokens;
+pub mod tts;
 pub mod tty_writer;
 pub(crate) mod utils;
 pub mod vectors;

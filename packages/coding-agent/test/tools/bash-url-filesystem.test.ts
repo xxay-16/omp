@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { resolveLocalRoot } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -151,5 +152,79 @@ describe("bash internal URLs through the shell filesystem", () => {
 		const { isError } = await run("printf 'x' > omp://README.md");
 
 		expect(isError).toBe(true);
+	});
+});
+
+describe("bash writes to handler-written URLs", () => {
+	let manager: AsyncJobManager;
+
+	beforeEach(() => {
+		manager = new AsyncJobManager({});
+		session = {
+			...session,
+			getSessionId: () => tempDir,
+			asyncJobManager: manager,
+			settings: Settings.isolated({ "bash.autoBackground.enabled": false, "bashInterceptor.enabled": false }),
+		} as unknown as ToolSession;
+	});
+
+	afterEach(async () => {
+		await manager.dispose();
+	});
+
+	it("cancels a background job through a redirect to proc://<id>/kill and shows the handler's answer", async () => {
+		const started = await new BashTool(session).execute("bg", { command: "sleep 30", async: true, timeout: 0 });
+		const id = started.details?.async?.jobId;
+		if (!id) throw new Error("expected a background job");
+
+		const { text, isError } = await run(`: > proc://${id}/kill`);
+
+		expect(isError).toBeUndefined();
+		expect(manager.getJob(id)?.status).toBe("cancelled");
+		expect(text).toContain(`proc://${id}/kill:`);
+		expect(text).toContain(`Cancelled background job ${id}`);
+	});
+
+	it("fails the command with the handler's reason when it refuses a write, and refuses appends that would replace", async () => {
+		const missing = await run(": > proc://nope/kill");
+		expect(missing.isError).toBe(true);
+		expect(missing.text).toContain("Write to proc://nope/kill failed: Background job or service not found: nope");
+
+		// A handler write replaces a stored target whole, so `>>` must not silently drop its content.
+		const appended = await run("echo true >> cfg://async/enabled; echo status=$?");
+		expect(appended.text).toContain("status=1");
+		expect(appended.text).toContain("truncate (>) instead of appending (>>)");
+	});
+});
+
+describe("bash replies through out://", () => {
+	it("carries each closed redirect as a reply, live and in the final result, without touching the output", async () => {
+		const frames: unknown[] = [];
+		const result = await new BashTool({ ...session, tuiTranscript: true }).execute(
+			"call",
+			{ command: "printf '**first**\\n' > out://; echo between; echo second >> out://" },
+			undefined,
+			update => frames.push(update.details),
+		);
+
+		expect(result.content.find(c => c.type === "text")?.text).toBe("between\n");
+		expect(result.details?.replies).toEqual(["**first**\n", "second\n"]);
+		// The first reply reaches the card while the command still runs.
+		expect(frames).toContainEqual({ replies: ["**first**\n"] });
+	});
+
+	it("drops an oversize reply instead of showing a truncated one, and refuses reads", async () => {
+		const big = await new BashTool({ ...session, tuiTranscript: true }).execute("call", {
+			// `yes` rather than /dev/zero, which Windows lacks.
+			command: "yes a | head -c 70000 | tr '\\n' a > out://; echo status=$?",
+		});
+		// Unix spells the rejected write by its errno text; Windows has no EFBIG errno and keeps the code.
+		const text = big.content.find(c => c.type === "text")?.text;
+		expect(text).toMatch(/File too large|EFBIG/);
+		expect(text).toContain("status=1");
+		expect(big.details?.replies).toBeUndefined();
+
+		const read = await run("cat out://; echo status=$?");
+		expect(read.text).toContain("status=1");
 	});
 });

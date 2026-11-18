@@ -9,6 +9,7 @@ import { isRecord } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type { ToolSession } from "../../tools";
 import { committedTodoPhases } from "../../tools/todo";
+import { isReplyWrite, toolResultReplies } from "@oh-my-pi/pi-tui/chat/reply-write";
 import { parseMCPProgress } from "@oh-my-pi/pi-tui/tools/mcp";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { schemaDeclaresIntentField } from "../../utils/tool-schema";
@@ -23,6 +24,7 @@ import {
 	runEvalJudgmentBatch,
 } from "../judgment-batch-bridge";
 import { EVAL_JUDGMENT_BRIDGE_NAME, type EvalJudgmentResult, runEvalJudgment } from "../judgment-bridge";
+import { EVAL_SHELL_BRIDGE_NAME, type EvalShellResult, runEvalShell } from "../shell-bridge";
 import {
 	EVAL_CANCEL_BRIDGE_NAME,
 	type EvalHandleSnapshot,
@@ -34,7 +36,7 @@ import {
 } from "../handle-bridge";
 import type { EvalShadowCellSession } from "../speculation/cell-session";
 import { getActiveEvalShadowCell } from "../speculation/runtime-context";
-import { isEvalBridgeToolCallable } from "../tool-bridge-policy";
+import { isEvalBridgeToolCallable, withEvalBridgeToolCall } from "../tool-bridge-policy";
 import { EVAL_WORKPOOL_BRIDGE_NAME, type EvalWorkpoolResult, runEvalWorkpool } from "../workpool-bridge";
 import type { RuntimeCallIdentity } from "./shared/runtime";
 import type { JsStatusEvent } from "./shared/types";
@@ -42,19 +44,31 @@ import type { JsStatusEvent } from "./shared/types";
 /** These tools await delegated subagents/jobs, not the cell runtime's own work. */
 const DELEGATED_WORK_TOOLS = new Set(["task", "wait"]);
 
+const NO_REPLY_SINK =
+	"out:// replies do not reach the user from here; write to out:// from a foreground eval cell or reply in your final message.";
+
 export type { JsStatusEvent } from "./shared/types";
 
 export interface ToolBridgeOptions {
 	session: ToolSession;
 	signal?: AbortSignal;
+	/** The cell's `timeout` in ms, the budget of a prelude call that sets none (`EvalPreludeContext.cellTimeoutMs`). */
+	cellTimeoutMs?: number;
 	emitStatus?: (event: JsStatusEvent) => void;
 	identity?: RuntimeCallIdentity;
 	shadowCell?: EvalShadowCellSession;
+	/**
+	 * Shows the user what a bridged call sent to a reply URL (`out://`): a `write`'s content, or the
+	 * `details.replies` of a call whose commands wrote there. Throws to refuse a reply. Absent: nothing
+	 * would draw them, so such calls fail instead of reporting a reply nobody sees.
+	 */
+	onReply?: (text: string) => void;
 }
 
 type ToolValue =
 	| string
 	| EvalBudgetResult
+	| EvalShellResult
 	| EvalAgentHandleResult
 	| EvalCompletionHandleResult
 	| EvalJudgmentResult
@@ -152,7 +166,11 @@ const summarizeToolResult: StatusSummarizer = (name, args, result, text, hasErro
  */
 function summarizePreludeResult(session: ToolSession): StatusSummarizer {
 	return (name, args, result, text, hasError) => {
-		if (hasError) return { op: name, error: text.slice(0, 500) };
+		if (hasError) {
+			const details = isRecord(result.details) ? result.details : {};
+			const error = isRecord(details.error) ? details.error : {};
+			return { op: name, error: (typeof error.message === "string" ? error.message : text).slice(0, 500) };
+		}
 		const detail = findEnabledEvalPrelude(session, name)?.status?.(args, result);
 		return detail === undefined ? undefined : { op: name, detail };
 	};
@@ -210,7 +228,11 @@ function waitForSpeculativeClaim<T>(claim: Promise<T>, signal?: AbortSignal): Pr
 	return promise;
 }
 
-export async function callSessionTool(name: string, args: unknown, options: ToolBridgeOptions): Promise<ToolValue> {
+export function callSessionTool(name: string, args: unknown, options: ToolBridgeOptions): Promise<ToolValue> {
+	return withEvalBridgeToolCall(options.session.xdev, () => dispatchSessionTool(name, args, options));
+}
+
+async function dispatchSessionTool(name: string, args: unknown, options: ToolBridgeOptions): Promise<ToolValue> {
 	if (name === "__prelude__") {
 		const request = parsePreludeRequest(args);
 		const toolCallId = `prelude-${request.name}-${crypto.randomUUID()}`;
@@ -224,6 +246,7 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 					session: options.session,
 					toolCallId,
 					signal: options.signal,
+					cellTimeoutMs: options.cellTimeoutMs,
 					context: options.session.getToolContext?.(),
 				}),
 			);
@@ -257,6 +280,9 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 	if (name === EVAL_BUDGET_BRIDGE_NAME) {
 		return await runEvalBudget(args, options);
 	}
+	if (name === EVAL_SHELL_BRIDGE_NAME) {
+		return await runEvalShell(args, options);
+	}
 	if (name === EVAL_WAIT_BRIDGE_NAME) {
 		return await runEvalWait(args, options);
 	}
@@ -273,8 +299,6 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 	// Wire aliases share every guard, status and bookkeeping path with the canonical tool.
 	name = tool.name;
 	if (!isEvalBridgeToolCallable(tool)) {
-		// The session recognizes checkpoint/rewind only as direct toolResult
-		// messages; a bridged call would report success without taking effect.
 		throw new ToolError(`\`${name}\` cannot run through the eval bridge; call the direct \`${name}\` tool.`);
 	}
 	const toolCallId = `js-${name}-${crypto.randomUUID()}`;
@@ -299,6 +323,15 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 			error: error instanceof Error ? error.message : String(error),
 		});
 		throw error;
+	}
+	// The transcript draws a direct `write out://` from its args; a bridged one only reaches the user through `onReply`.
+	const reply =
+		isReplyWrite(name, validatedArgs) === true && isRecord(validatedArgs) && typeof validatedArgs.content === "string"
+			? validatedArgs.content
+			: undefined;
+	if (reply !== undefined && !options.onReply) {
+		options.emitStatus?.({ op: name, error: NO_REPLY_SINK });
+		throw new ToolError(NO_REPLY_SINK);
 	}
 	const shadowCell = options.shadowCell ?? getActiveEvalShadowCell();
 	if (shadowCell && options.identity) {
@@ -342,7 +375,12 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 			// rehydration reads; without this the in-memory update is lost on the
 			// next resume/rewind/fork and stale todos trigger a false reminder.
 			const phases = committedTodoPhases(result);
-			if (phases) options.session.persistTodoPhases?.(phases);
+			if (phases) options.session.commitTodoPhases?.(phases);
+		}
+		const replies = reply === undefined ? toolResultReplies(result.details) : [reply];
+		if (replies.length > 0) {
+			if (!options.onReply) throw new ToolError(NO_REPLY_SINK);
+			for (const text of replies) options.onReply(text);
 		}
 		return bridgeValueFromToolResult(name, validatedArgs, result, options.emitStatus);
 	} catch (error) {

@@ -109,10 +109,7 @@ impl std::fmt::Display for AbsoluteRangeOp {
 }
 
 fn reg_suffix(register: Option<&str>) -> String {
-	match register {
-		Some(reg) => format!(" @{reg}"),
-		None => String::new(),
-	}
+	register.map_or_default(|reg| format!(" @{reg}"))
 }
 
 fn range_op_single(op: AbsoluteRangeOp, line: u32, register: Option<&str>) -> String {
@@ -641,10 +638,7 @@ pub fn boundary_variant_repair_warning(start_line: u32, kept: u32, dropped: u32)
 /// tree-sitter and surfaced in the same response instead of waiting for a
 /// compiler pass.
 pub fn edit_broke_parse_warning(first_changed_line: Option<u32>) -> String {
-	let at = match first_changed_line {
-		Some(line) => format!(" near line {line}"),
-		None => String::new(),
-	};
+	let at = first_changed_line.map_or_default(|line| format!(" near line {line}"));
 	format!(
 		"This edit introduced a syntax error{at}: the file parsed before the patch and no longer \
 		 does. It was applied exactly as written, so a line number or range endpoint is likely \
@@ -840,23 +834,6 @@ pub const RECOVERY_LINE_REMAP_WARNING: &str = "Recovered by remapping stale line
 pub const HEADTAIL_DRIFT_WARNING: &str =
 	"Applied the `PUT <1:`/`PUT >$:` edit despite a stale snapshot tag (file changed since your \
 	 read) — head/tail position is content-independent. Re-read if the drift was unexpected.";
-
-/// Disk content after write differs from what was sent (e.g. IDE format on
-/// save).
-///
-/// See `WriteResult.text` — most commonly an ACP-connected editor reformatting
-/// the buffer on save (e.g. `format_on_save` with tab/space settings that don't
-/// match the file). The recorded snapshot is re-keyed on the real, post-write
-/// content so the next edit's tag validation matches reality instead of
-/// silently drifting.
-pub fn write_drift_warning(path: &str) -> String {
-	format!(
-		"{path}: the file on disk after this write differs from what was sent — the client \
-		 (editor/IDE) likely reformatted it on save (e.g. format-on-save, tab/space settings). The \
-		 returned snapshot reflects the actual file; re-read before further edits if the extra \
-		 changes were unexpected."
-	)
-}
 
 /// Section named a nonexistent path matching an earlier snapshot's name and
 /// tag.
