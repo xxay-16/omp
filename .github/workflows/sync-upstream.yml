@@ -29,13 +29,23 @@ jobs:
             echo "已是最新, 无需合并"
             exit 0
           fi
-          if ! git merge --no-commit --no-ff upstream/main; then
-            echo "::error::上游合并冲突, 请到本地手动处理: git pull upstream main"
-            exit 1
-          fi
           # GITHUB_TOKEN 是 GitHub App, 没有 workflows 权限, 无法推送对
           # .github/workflows/ 的修改 (remote rejected)。上游 CI 文件对本仓库
           # 无用 (上游的 CI 已在本仓库禁用), 合并时永远保留本仓库的版本。
+          # 因此 workflow 冲突属于预期: 只要冲突全部在 .github/workflows 下,
+          # 就把整个目录重置为本仓库版本后继续提交; 其他冲突必须人工处理。
+          if ! git merge --no-commit --no-ff upstream/main; then
+            other=$(git diff --name-only --diff-filter=U | grep -v '^\.github/workflows/' || true)
+            if [ -n "$other" ]; then
+              git merge --abort
+              echo "::error::上游合并非 workflow 冲突, 需人工处理: $other"
+              exit 1
+            fi
+            echo "workflow 冲突, 保留本仓库版本"
+          fi
+          # 先清空索引里的 workflows, 上游新增的 workflow 文件才不会进入提交
+          # (否则推送仍会被 GITHUB_TOKEN 的 workflows 权限拒绝)。
+          git rm -r -q -f --cached .github/workflows
           git checkout origin/main -- .github/workflows
           git commit -m "chore: merge upstream main (workflows pinned to ours)"
           git push origin main
