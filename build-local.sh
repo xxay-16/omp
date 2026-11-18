@@ -3,7 +3,7 @@
 # 用法: ./build-local.sh
 #
 # 环境前提（已为本机配置好，换机器需重新准备）:
-#   - Bun:        ~/.bun/bin/bun
+#   - Bun:        ~/.bun/bin/bun（版本需满足 package.json engines，当前 >= 1.4.4）
 #   - Rust:       nightly-2026-10-06 (rustup, 见 rust-toolchain.toml)
 #                 工具链实体在 /work4/User/wangzhiyuan/software/runtime/rust/
 #                 (~/.rustup 与 ~/.cargo 是指向它的软链接)
@@ -20,6 +20,10 @@ export PATH="$HOME/.bun/bin:$PATH"
 # 导致 tree-sitter 编译时报 be16toh 未声明。_BSD_SOURCE 是 2.17 时代的对应宏。
 export CFLAGS="-D_BSD_SOURCE"
 export CXXFLAGS="-D_BSD_SOURCE"
+
+# rustup 官方源 (static.rust-lang.org) 在国内实测只有 ~20KB/s，换工具链时会卡死
+# 几十分钟；rsproxy 镜像实测 ~6MB/s。只在未显式设置时生效。
+export RUSTUP_DIST_SERVER="${RUSTUP_DIST_SERVER:-https://rsproxy.cn}"
 
 echo "==> bun install"
 bun install

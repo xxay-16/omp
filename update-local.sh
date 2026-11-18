@@ -19,6 +19,9 @@ export PATH="/data1/work1/Conda/miniforge_wzy/envs/tools/bin:$HOME/.bun/bin:$HOM
 # glibc 2.17 头文件修复 (tree-sitter be16toh)
 export CFLAGS="-D_BSD_SOURCE" CXXFLAGS="-D_BSD_SOURCE"
 
+# 上游换 Rust 工具链时 rustup 会下载组件; 官方源国内极慢, 走 rsproxy 镜像
+export RUSTUP_DIST_SERVER="${RUSTUP_DIST_SERVER:-https://rsproxy.cn}"
+
 mkdir -p /tmp/opencode
 log() { echo "[$(date '+%F %T')] $*"; }
 

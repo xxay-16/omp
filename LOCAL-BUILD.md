@@ -7,6 +7,7 @@
 1. GitHub Actions `sync-upstream.yml`：每天 02:17（北京时间）合并上游 → 推送到本仓库
 2. 本机 crontab：每天 07:30/12:30/17:30 跑 `update-local.sh`（pull + 按需重建，日志 `/tmp/opencode/omp-update.log`）
 3. GitHub Actions `build-centos7.yml`：同步后自动在 centos:7 容器构建，**每次构建独立发版**（tag 格式 `v<版本号>+<短sha>`，如 `v18.12.4+705f8c0`，历史产物永不覆盖）
+4. workflow 冲突自动处理：`sync-upstream.yml` 合并上游时，只要冲突全部在 `.github/workflows/` 下，就把整个目录重置为本仓库版本（上游新增的 workflow 文件也不会进入提交）后继续提交；其他文件有冲突才判定失败、需人工处理
 
 ```bash
 # 下载指定构建的产物
@@ -37,11 +38,19 @@ TS 代码由 Bun 直接解释执行，无需编译；每次上游更新后只需
 ## 本机环境要点（换机器重建时参考）
 
 1. **glibc 2.17 老头文件**：不认识 `_DEFAULT_SOURCE`，tree-sitter 编译报 `be16toh` 未声明 → 必须 `CFLAGS="-D_BSD_SOURCE"`（脚本已内置）。
-2. **rustup 直连可用**：`static.rust-lang.org` 直连通；走 mihomo 代理反而 TLS 失败。
+2. **rustup 直连可用**：`static.rust-lang.org` 直连通；走 mihomo 代理反而 TLS 失败。但直连**极慢**（实测 ~20KB/s），上游 bump `rust-toolchain.toml` 后下载新工具链会卡几十分钟。现在 `build-local.sh` / `update-local.sh` 默认设 `RUSTUP_DIST_SERVER=https://rsproxy.cn`（实测 ~6MB/s）。
 3. **crates.io 走镜像**：`~/.cargo/config.toml` 配置了 rsproxy.cn（直连快）；直连 crates.io 会卡死数小时。
 4. **ninja**：`opusic-sys` 用 cmake+Ninja 构建，`pip install ninja`（清华镜像）。
 5. **Rust 工具链**实体在 `/work4/User/wangzhiyuan/software/runtime/rust/`（home 通过软链接引用，home 分区很小）。
 6. **AVX2 必需**：Bun 官方 linux-x64 构建需要 AVX2；老 CPU 需换 `bun-linux-x64-baseline`。
+7. **Bun 版本必须满足 `engines`**：上游要求 `bun >= 1.4.4`（见根 `package.json`）。版本过低时 `bun install` 能跑，但 `omp` 一启动就报 `error: Bun runtime must be >= 1.4.4`。升级走 npm 源最快（GitHub release 直连基本下不动）：
+
+   ```bash
+   cd /tmp && curl -sSLO https://registry.npmjs.org/@oven/bun-linux-x64/-/bun-linux-x64-1.4.4.tgz
+   tar xzf bun-linux-x64-1.4.4.tgz
+   cp ~/.bun/bin/bun ~/.bun/bin/bun.bak
+   install -m 0755 package/bin/bun ~/.bun/bin/bun
+   ```
 
 ## 部署到其他同构主机（glibc 2.17 + AVX2，如 172.30.1.100）
 
